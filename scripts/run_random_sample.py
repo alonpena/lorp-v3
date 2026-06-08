@@ -1,0 +1,96 @@
+#!/usr/bin/env python
+"""Run a random sample of K Excel rows and produce consolidated CSV + summary.
+
+Usage::
+
+    .venv/bin/python scripts/run_random_sample.py --k 20 --seed 42 --seconds 30 --runs 3 --run-id sample20
+
+Outputs land in ``outputs/<run-id>/consolidated.csv`` and ``outputs/<run-id>/summary.json``.
+"""
+
+import argparse
+import logging
+import random
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from lorp_fsd.batch import run_rows, summarize, write_consolidated_csv, write_consolidated_excel, write_summary, write_summary_markdown
+from lorp_fsd.excel_loader import load_lorp_fsd_rows
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run random sample of Excel rows (LoRP-FSD batch).")
+    parser.add_argument("--k", type=int, required=True, help="Number of rows to sample")
+    parser.add_argument("--seed", type=int, default=42, help="RNG seed for sample selection")
+    parser.add_argument("--xlsx", default="results_MILP.xlsx", help="Excel file")
+    parser.add_argument("--seconds", type=float, default=30.0, help="Seconds per solve run")
+    parser.add_argument("--runs", type=int, default=3, help="Number of solve runs per iteration")
+    parser.add_argument("--max-iter", type=int, default=5, help="Max repair iterations")
+    parser.add_argument("--repair-policy", default="baseline", choices=["baseline", "safe_length", "safe_capacity_release", "safe_both"], help="Repair candidate safety policy")
+    parser.add_argument("--max-repair-attempts", type=int, default=1, help="Reserved for bounded Phase 7 repair retries")
+    parser.add_argument("--solver-seed", type=int, default=0, help="Solver RNG seed")
+    parser.add_argument("--run-id", default="random_sample", help="Run identifier")
+    parser.add_argument("--plots", action="store_true", help="Generate per-iteration plots")
+    parser.add_argument("--excel", action="store_true", help="Also write Excel output")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    # Determine total row count.
+    all_configs = load_lorp_fsd_rows(args.xlsx)
+    n_total = len(all_configs)
+    k = min(args.k, n_total)
+
+    rng = random.Random(args.seed)
+    row_indices = sorted(rng.sample(range(n_total), k))
+    print(f"Sampled {k} rows (seed={args.seed}): {row_indices[:10]}{'...' if k > 10 else ''}")
+
+    out_dir = Path("outputs") / args.run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt = str(out_dir / "checkpoint.csv")
+
+    records = run_rows(
+        row_indices,
+        args.xlsx,
+        root=".",
+        output_root="outputs",
+        run_id=args.run_id,
+        seconds_per_run=args.seconds,
+        num_solve_runs=args.runs,
+        max_repair_iterations=args.max_iter,
+        seed=args.solver_seed,
+        make_plots=args.plots,
+        checkpoint_csv=ckpt,
+        repair_candidate_policy=args.repair_policy,
+        max_repair_attempts=args.max_repair_attempts,
+        return_completed_records=True,
+    )
+
+    csv_path = write_consolidated_csv(records, str(out_dir / "consolidated.csv"))
+    print(f"Consolidated CSV: {csv_path}")
+
+    if args.excel:
+        xlsx_path = write_consolidated_excel(records, str(out_dir / "consolidated.xlsx"))
+        print(f"Consolidated Excel: {xlsx_path}")
+
+    summary = summarize(records)
+    json_path = write_summary(summary, str(out_dir / "summary.json"))
+    md_path = write_summary_markdown(summary, str(out_dir / "summary.md"))
+    print(f"Summary JSON: {json_path}")
+    print(f"Summary MD:   {md_path}")
+
+    print(f"\n{'='*60}")
+    print(f"  Rows: {len(records)}  |  FEASIBLE: {summary['n_success']}  |  "
+          f"STUCK: {summary['n_stuck_noncapacity']}  |  "
+          f"REPAIR_FAIL: {summary['n_repair_failed']}  |  "
+          f"MAX_ITER: {summary['n_max_iterations']}  |  "
+          f"ERROR: {summary['n_error']}")
+    if summary.get("mean_gap") is not None:
+        print(f"  GAP: min={summary['min_gap']:.6f}  mean={summary['mean_gap']:.6f}  max={summary['max_gap']:.6f}")
+    print(f"{'='*60}")
+
+
+if __name__ == "__main__":
+    main()

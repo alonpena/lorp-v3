@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lor-pyvrp-benchmark"
+version = "0.1.0"
+description = "LoR-PyVRP benchmarking module"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.2",
+  "openpyxl>=3.1",
+  "matplotlib>=3.8",
+  "pyvrp>=0.9",
+  "tqdm>=4.66",
+  "streamlit>=1.57.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+markers = ["integration: requires external files or optional deps"]
+
+[tool.setuptools]
+py-modules = [
+  "lor_pyvrp_benchmark",
+  "dat_loader",
+  "xlsx_loader",
+  "instance_adapter",
+  "instance_resolver",
+  "da_geometry",
+  "reporting",
+  "pyvrp_model",
+  "viz",
+]
+
+# v3 package (src layout). Legacy flat modules above remain until v3 is validated.
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["lorp_fsd*"]

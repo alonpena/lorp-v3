@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+.pytest_cache/
+outputs/
+pipeline_out/
+*.log
+.DS_Store
+*.egg-info/
+build/
+dist/
+.claude/
+.agents/
+.idea/
+instances_old/
+gurobi.log

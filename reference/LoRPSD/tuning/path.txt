@@ -1,0 +1,3 @@
+/usr/local/lib/R/site-library/irace/bin/irace
+
+ /usr/local/lib/R/site-library/irace/bin/irace -s scenario.txt -p parameters-llrp.txt --parallel 8
