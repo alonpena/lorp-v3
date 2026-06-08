@@ -211,12 +211,18 @@ def run_row(
             capacity_not_freed_count=capacity_not_freed_count,
         )
         if make_plots:
-            from .plotting import plot_iteration
+            from .plotting import plot_instance_state, plot_iteration
+            paths["instance"] = plot_instance_state(
+                out_dir / f"iteration_{it:02d}_instance.png", instance=instance,
+                facility_design=facility_design, config=config, iteration=it,
+                row_index=config.row_index,
+            )
             paths["solution"] = plot_iteration(
                 out_dir / f"iteration_{it:02d}_solution.png", instance=instance,
                 facility_design=facility_design, parsed=parsed, capacity=cap, config=config,
                 iteration=it, forbidden=set(forbidden), removed_clients=set(removed_prev),
-                fully_feasible=feas.fully_feasible,
+                fully_feasible=feas.fully_feasible, row_index=config.row_index,
+                status=iter_status, cost=cost, metric=metric,
             )
 
         iterations.append(IterationResult(
@@ -254,7 +260,9 @@ def run_row(
         repair_candidate_policy=repair_candidate_policy, route_length_repair_attempts=0,
     )
     write_row_reporting_artifacts(out_dir, iterations, result.status)
-    write_basic_row_report_artifacts(out_dir, result, config)
+    write_basic_row_report_artifacts(
+        out_dir, result, config, instance=instance, geometry=geometry, facility_design=facility_design,
+    )
     return result
 
 

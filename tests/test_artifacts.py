@@ -19,8 +19,13 @@ def _iteration(repair_selection):
         capacity_feasible=False,
         total_excess=5.0,
     )
+    parsed = SimpleNamespace(
+        routes=[SimpleNamespace(client_sequence=(1, 7), demand=15.0)],
+        da_assignments=[SimpleNamespace(client_id=9, demand=5.0), SimpleNamespace(client_id=10, demand=3.0)],
+    )
     return SimpleNamespace(
         iteration=0,
+        parsed=parsed,
         cost=SimpleNamespace(
             cost_routing=10.0,
             cost_direct_all=20.0,
@@ -182,6 +187,8 @@ def test_basic_row_report_artifacts_include_json_md_cost_and_depot_usage(tmp_pat
     assert report["pyvrp"]["total"] == 100.0
     assert report["milp"]["UB"] == 90.0
     assert report["capacity"]["overloaded_depots"] == [1]
+    assert report["service_mix"]["routing_clients"] == 2
+    assert report["service_mix"]["da_clients"] == 2
     assert report["repair"]["selected_candidates"] == [[1, 7]]
     assert report["repair"]["rejected_candidates"] == [[1, 9, REJECTION_NO_LENGTH_ALTERNATIVE]]
 
@@ -200,4 +207,18 @@ def test_basic_row_report_artifacts_include_json_md_cost_and_depot_usage(tmp_pat
 
     md = paths["report_md"].read_text()
     assert "# Row 7 — sample.dat" in md
+    assert "## Instance and Excel/MILP summary" in md
+    assert "## MILP vs PyVRP cost comparison" in md
+    assert "## Feasibility checks" in md
+    assert "## Depot usage" in md
+    assert "## Routing/DA mix" in md
+    assert "## Repair summary" in md
+    assert "## Interpretation" in md
+    assert "## Legacy-style summary" in md
+    assert "### Costs (PyVRP vs MILP)" in md
+    assert "- total: PyVRP=100   MILP=90   delta=10" in md
+    assert "| total | 90 | 100 | 10 |" in md
+    assert "| clients served by routing | 2 |" in md
     assert "`cost-breakdown.csv`" in md
+    assert "`iteration_XX_instance.png`" in md
+    assert "`iteration_XX_solution.png`" in md

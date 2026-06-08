@@ -355,8 +355,42 @@ def _depot_usage_rows(result) -> List[Dict[str, Any]]:
     return rows
 
 
-def build_row_report_payload(result, config) -> Dict[str, Any]:
-    """Build basic row-level report payload from final RowRunResult state."""
+def _service_mix(result) -> Dict[str, Any]:
+    parsed = result.final.parsed
+    routing_clients = {cid for route in parsed.routes for cid in route.client_sequence}
+    da_clients = {a.client_id for a in parsed.da_assignments}
+    return {
+        "routing_clients": len(routing_clients),
+        "da_clients": len(da_clients),
+        "routing_routes": len(parsed.routes),
+        "total_routing_demand": sum(r.demand for r in parsed.routes),
+        "total_DA_demand": sum(a.demand for a in parsed.da_assignments),
+    }
+
+
+def _rejected_reason_counts(rejected) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for _depot_id, _client_id, reason in rejected:
+        counts[reason] = counts.get(reason, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _selected_depot_ids(config, facility_design=None) -> List[int]:
+    if facility_design is not None:
+        return list(facility_design.active_depot_ids)
+    selected = getattr(config, "selected_depots", {}) or {}
+    return sorted(selected)
+
+
+def _depot_capacities(config, facility_design=None) -> Dict[int, Any]:
+    if facility_design is not None:
+        return {i: d.capacity for i, d in sorted(facility_design.depots.items())}
+    selected = getattr(config, "selected_depots", {}) or {}
+    return {i: getattr(d, "capacity", None) for i, d in sorted(selected.items())}
+
+
+def build_row_report_payload(result, config, *, instance=None, geometry=None, facility_design=None) -> Dict[str, Any]:
+    """Build row-level report payload from final RowRunResult state."""
     final = result.final
     repair_selections = [it.repair_selection for it in result.iterations if it.repair_selection is not None]
     selected = sorted({p for sel in repair_selections for p in getattr(sel, "selected", set())})
@@ -371,11 +405,21 @@ def build_row_report_payload(result, config) -> Dict[str, Any]:
         "total_solve_time": result.total_solve_time,
         "repair_candidate_policy": getattr(result, "repair_candidate_policy", ""),
         "final_forbidden_count": len(getattr(result, "final_forbidden", [])),
+        "instance": {
+            "n_clients": getattr(instance, "n_clients", None),
+            "n_depots": getattr(instance, "n_depots", None),
+            "vehicle_capacity_Q": getattr(instance, "vehicle_capacity", None),
+        },
         "parameters": {
             "F_R": getattr(config, "F_R", None),
             "F_A": getattr(config, "F_A", None),
             "R": getattr(config, "R", None),
             "Length": getattr(config, "Length", None),
+            "scale": getattr(geometry, "scale", None),
+        },
+        "facility_design": {
+            "open_depots": _selected_depot_ids(config, facility_design),
+            "depot_capacities": _depot_capacities(config, facility_design),
         },
         "milp": {
             "UB": getattr(config, "UB", None),
@@ -394,6 +438,7 @@ def build_row_report_payload(result, config) -> Dict[str, Any]:
             "cost_depots": getattr(final.cost, "cost_depots", None),
             "total": getattr(final.cost, "total", None),
         },
+        "cost_breakdown": _cost_breakdown_rows(result, config),
         "comparison_metric": {
             "label": getattr(final.metric, "label", ""),
             "value": getattr(final.metric, "value", None),
@@ -407,15 +452,20 @@ def build_row_report_payload(result, config) -> Dict[str, Any]:
             "route_capacity_feasible": not getattr(final.feasibility, "route_capacity_violations", []),
             "da_radius_feasible": not getattr(final.feasibility, "da_radius_violations", []),
             "penalty_distance_suspected": getattr(final.feasibility, "penalty_distance_suspected", False),
+            "route_length_violations": getattr(final.feasibility, "route_length_violations", []),
+            "route_capacity_violations": getattr(final.feasibility, "route_capacity_violations", []),
+            "da_radius_violations": getattr(final.feasibility, "da_radius_violations", []),
         },
         "capacity": {
             "total_excess": final.capacity.total_excess,
             "overloaded_depots": _overloaded_depots(final.capacity),
             "depots": _depot_usage_rows(result),
         },
+        "service_mix": _service_mix(result),
         "repair": {
             "selected_candidates": [list(p) for p in selected],
             "rejected_candidates": [list(p) for p in rejected],
+            "rejected_reason_counts": _rejected_reason_counts(rejected),
             "selected_count": len(selected),
             "rejected_count": len(rejected),
         },
@@ -430,9 +480,10 @@ def build_row_report_payload(result, config) -> Dict[str, Any]:
     }
 
 
-def write_report_json(output_dir: Path, result, config) -> Path:
+def write_report_json(output_dir: Path, result, config, *, instance=None, geometry=None, facility_design=None) -> Path:
     path = Path(output_dir) / "report.json"
-    path.write_text(json.dumps(build_row_report_payload(result, config), indent=2), encoding="utf-8")
+    payload = build_row_report_payload(result, config, instance=instance, geometry=geometry, facility_design=facility_design)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
 
 
@@ -456,28 +507,214 @@ def write_depot_usage_csv(output_dir: Path, result) -> Path:
     return path
 
 
-def write_report_md(output_dir: Path, result, config) -> Path:
-    payload = build_row_report_payload(result, config)
+def _fmt(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
+
+
+def _pass_fail(ok: bool) -> str:
+    return "PASS" if ok else "FAIL"
+
+
+def _markdown_cost_table(rows: List[Dict[str, Any]]) -> List[str]:
+    lines = ["| component | MILP | PyVRP | delta |", "|---|---:|---:|---:|"]
+    for row in rows:
+        lines.append(
+            f"| {row['component']} | {_fmt(row['milp'])} | {_fmt(row['pyvrp'])} | {_fmt(row['delta'])} |"
+        )
+    return lines
+
+
+def _markdown_depot_table(rows: List[Dict[str, Any]]) -> List[str]:
+    lines = [
+        "| depot | cap | routing demand | DA demand | total demand | usage % | excess | overloaded |",
+        "|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {row['depot_id']} | {_fmt(row['capacity'])} | {_fmt(row['demand_routing'])} | "
+            f"{_fmt(row['demand_DA'])} | {_fmt(row['demand_total'])} | {_fmt(row['usage_pct'])} | "
+            f"{_fmt(row['excess'])} | {row['overloaded']} |"
+        )
+    return lines
+
+
+def _markdown_feasibility_table(feas: Dict[str, Any]) -> List[str]:
+    checks = [
+        ("served exactly once", feas["served_exactly_once"], ""),
+        ("capacity feasible", feas["capacity_feasible"], ""),
+        ("route length feasible", feas["route_length_feasible"], f"violations={len(feas['route_length_violations'])}"),
+        ("route capacity feasible", feas["route_capacity_feasible"], f"violations={len(feas['route_capacity_violations'])}"),
+        ("DA radius feasible", feas["da_radius_feasible"], f"violations={len(feas['da_radius_violations'])}"),
+        ("penalty distance suspected", not feas["penalty_distance_suspected"], str(feas["penalty_distance_suspected"])),
+    ]
+    lines = ["| check | pass/fail | notes |", "|---|---|---|"]
+    for name, ok, notes in checks:
+        lines.append(f"| {name} | {_pass_fail(ok)} | {notes} |")
+    return lines
+
+
+def _interpretation(payload: Dict[str, Any]) -> str:
+    metric = payload["comparison_metric"]
+    value = metric.get("value")
+    flags = metric.get("flags") or []
+    if payload["feasibility"]["fully_feasible"]:
+        if value is not None and abs(value) <= 1e-4 and not flags:
+            return "This row is fully feasible. PyVRP reconstructed cost matches MILP within rounding tolerance."
+        if flags:
+            return "This row is fully feasible, but metric flags require cost-comparison review."
+        return "This row is fully feasible. Review GAP magnitude against MILP benchmark."
+    if payload["repair"]["selected_count"] or payload["repair"]["rejected_count"]:
+        return "This row is not fully feasible after repair attempts. Inspect repair_trace.csv and depot_usage.csv."
+    return "This row is not fully feasible and no repair candidate resolved the remaining violations."
+
+
+def _legacy_summary_lines(payload: Dict[str, Any]) -> List[str]:
+    """Legacy lor-v2-inspired compact report blocks."""
+    milp = payload["milp"]
+    pyvrp = payload["pyvrp"]
+    mix = payload["service_mix"]
+    metric = payload["comparison_metric"]
+    lines = [
+        "## Legacy-style summary",
+        "",
+        "### Identification",
+        "",
+        f"- id: {payload['row_id']}",
+        f"- instancia: {payload['instance_name']}",
+        f"- F_R: {_fmt(payload['parameters']['F_R'])}",
+        f"- F_A: {_fmt(payload['parameters']['F_A'])}",
+        f"- R: {_fmt(payload['parameters']['R'])}",
+        f"- Length: {_fmt(payload['parameters']['Length'])}",
+        "",
+        "### Costs (PyVRP vs MILP)",
+        "",
+    ]
+    for row in payload["cost_breakdown"]:
+        label = row["component"]
+        lines.append(f"- {label}: PyVRP={_fmt(row['pyvrp'])}   MILP={_fmt(row['milp'])}   delta={_fmt(row['delta'])}")
+    lines.extend([
+        "",
+        "### Demand / service",
+        "",
+        f"- routing clients: {mix['routing_clients']}",
+        f"- DA clients: {mix['da_clients']}",
+        f"- routing demand: {_fmt(mix['total_routing_demand'])}",
+        f"- DA demand: {_fmt(mix['total_DA_demand'])}",
+        "",
+        "### Per depot",
+        "",
+    ])
+    for row in payload["capacity"]["depots"]:
+        lines.append(
+            f"- depot {row['depot_id']}: cap={_fmt(row['capacity'])}  demand={_fmt(row['demand_total'])}  "
+            f"DA={_fmt(row['demand_DA'])}  routing={_fmt(row['demand_routing'])}  usage={_fmt(row['usage_pct'])}%  excess={_fmt(row['excess'])}"
+        )
+    lines.extend([
+        "",
+        "### Summary",
+        "",
+        f"- status: {payload['status']}",
+        f"- fully feasible: {payload['feasibility']['fully_feasible']}",
+        f"- total cost (PyVRP): {_fmt(pyvrp['total'])}",
+        f"- MILP UB: {_fmt(milp['UB'])}",
+        f"- {metric['label']}: {_fmt(metric['value'])}",
+        f"- capacity violated: {not payload['feasibility']['capacity_feasible']}",
+        "",
+    ])
+    return lines
+
+
+def write_report_md(output_dir: Path, result, config, *, instance=None, geometry=None, facility_design=None) -> Path:
+    payload = build_row_report_payload(result, config, instance=instance, geometry=geometry, facility_design=facility_design)
     path = Path(output_dir) / "report.md"
     metric = payload["comparison_metric"]
     capacity = payload["capacity"]
     repair = payload["repair"]
+    mix = payload["service_mix"]
+    params = payload["parameters"]
+    instance_info = payload["instance"]
+    facility = payload["facility_design"]
+    milp = payload["milp"]
+
     lines = [
         f"# Row {payload['row_id']} — {payload['instance_name']}",
+        "",
+        "## Instance and Excel/MILP summary",
+        "",
+        "| Field | Value |",
+        "|---|---|",
+        f"| row id | {payload['row_id']} |",
+        f"| instance name | {payload['instance_name']} |",
+        f"| n clients | {_fmt(instance_info['n_clients'])} |",
+        f"| n depots | {_fmt(instance_info['n_depots'])} |",
+        f"| vehicle capacity Q | {_fmt(instance_info['vehicle_capacity_Q'])} |",
+        f"| F_R | {_fmt(params['F_R'])} |",
+        f"| F_A | {_fmt(params['F_A'])} |",
+        f"| R | {_fmt(params['R'])} |",
+        f"| Length | {_fmt(params['Length'])} |",
+        f"| scale | {_fmt(params['scale'])} |",
+        f"| selected/open depots | {facility['open_depots']} |",
+        f"| depot capacities | {facility['depot_capacities']} |",
+        f"| MILP UB | {_fmt(milp['UB'])} |",
+        f"| MILP LB | {_fmt(milp['LB'])} |",
+        f"| MILP status | {_fmt(milp['status'])} |",
+        f"| MILP gap | {_fmt(milp['gap'])} |",
+        "",
+        "## MILP vs PyVRP cost comparison",
+        "",
+        *_markdown_cost_table(payload["cost_breakdown"]),
+        "",
+        "## Final status and metric",
         "",
         "| Field | Value |",
         "|---|---|",
         f"| status | {payload['status']} |",
-        f"| final_iteration | {payload['final_iteration']} |",
-        f"| n_iterations | {payload['n_iterations']} |",
-        f"| total_solve_time | {payload['total_solve_time']:.6f} |",
-        f"| repair_policy | {payload['repair_candidate_policy']} |",
-        f"| metric | {metric['label']}={metric['value']} |",
-        f"| total_excess | {capacity['total_excess']} |",
-        f"| overloaded_depots | {capacity['overloaded_depots']} |",
-        f"| selected_repair_candidates | {repair['selected_count']} |",
-        f"| rejected_repair_candidates | {repair['rejected_count']} |",
+        f"| fully feasible | {payload['feasibility']['fully_feasible']} |",
+        f"| metric | {metric['label']}={_fmt(metric['value'])} |",
+        f"| negative gap / metric flags | {metric['flags']} |",
+        f"| total runtime | {_fmt(payload['total_solve_time'])} |",
+        f"| number of iterations | {payload['n_iterations']} |",
+        f"| repair policy | {payload['repair_candidate_policy']} |",
         "",
+        "## Feasibility checks",
+        "",
+        *_markdown_feasibility_table(payload["feasibility"]),
+        "",
+        "## Depot usage",
+        "",
+        *_markdown_depot_table(capacity["depots"]),
+        "",
+        "## Routing/DA mix",
+        "",
+        "| Field | Value |",
+        "|---|---:|",
+        f"| clients served by routing | {mix['routing_clients']} |",
+        f"| clients served by DA | {mix['da_clients']} |",
+        f"| routing routes | {mix['routing_routes']} |",
+        f"| total routing demand | {_fmt(mix['total_routing_demand'])} |",
+        f"| total DA demand | {_fmt(mix['total_DA_demand'])} |",
+        "",
+        "## Repair summary",
+        "",
+        f"- selected candidates: {repair['selected_candidates']}",
+        f"- rejected candidates: {repair['rejected_candidates']}",
+        f"- rejected reasons: {repair['rejected_reason_counts']}",
+        f"- forbidden count: {payload['final_forbidden_count']}",
+    ]
+    if payload["status"] == "FEASIBLE" and payload["final_iteration"] == 0 and repair["selected_count"] == 0:
+        lines.append("- No repair was needed; solution feasible at iteration 0.")
+
+    lines.extend([
+        "",
+        "## Interpretation",
+        "",
+        _interpretation(payload),
+        "",
+        *_legacy_summary_lines(payload),
         "## Files",
         "",
         "- `report.json`",
@@ -485,16 +722,26 @@ def write_report_md(output_dir: Path, result, config) -> Path:
         "- `depot_usage.csv`",
         "- `iteration_summary.csv`",
         "- `repair_trace.csv`",
-    ]
+        "- `iteration_XX_instance.png`",
+        "- `iteration_XX_solution.png`",
+    ])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
 
-def write_basic_row_report_artifacts(output_dir: Path, result, config) -> Dict[str, Path]:
+def write_basic_row_report_artifacts(
+    output_dir: Path,
+    result,
+    config,
+    *,
+    instance=None,
+    geometry=None,
+    facility_design=None,
+) -> Dict[str, Path]:
     """Write basic row-level report.md/report.json/cost/depot CSV artifacts."""
     return {
-        "report_json": write_report_json(output_dir, result, config),
-        "report_md": write_report_md(output_dir, result, config),
+        "report_json": write_report_json(output_dir, result, config, instance=instance, geometry=geometry, facility_design=facility_design),
+        "report_md": write_report_md(output_dir, result, config, instance=instance, geometry=geometry, facility_design=facility_design),
         "cost_breakdown": write_cost_breakdown_csv(output_dir, result, config),
         "depot_usage": write_depot_usage_csv(output_dir, result),
     }
