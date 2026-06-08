@@ -9,7 +9,8 @@ per-row runner's semantics, the repair loop, or any Phase 1–5 modules.
 
 Robustness: every row is wrapped in a ``try/except``; a row that fails
 instance resolution, build, solve, or audit is recorded with
-``status = 'ERROR'`` (and the exception message) — it never crashes the batch.
+``status = 'ERROR'`` (and the exception message). Optional per-row wall timeouts
+record ``status = 'TIMEOUT'``. Neither case crashes the batch.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import multiprocessing as mp
+import queue
 import time
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -35,6 +38,7 @@ from .runner import (
 logger = logging.getLogger(__name__)
 
 STATUS_ERROR = "ERROR"
+STATUS_TIMEOUT = "TIMEOUT"
 
 # ── Consolidated row record ──────────────────────────────────────────────────
 
@@ -190,8 +194,8 @@ def build_row_record(result: RowRunResult, config) -> RowRecord:
     )
 
 
-def build_error_record(row_index: int, config, error: Exception) -> RowRecord:
-    """Stub record for a row that raised an exception."""
+def _stub_row_record(row_index: int, config, *, status: str, error_message: str, solve_time_total: float = 0.0) -> RowRecord:
+    """Stub record for a row without a successful RowRunResult."""
     return RowRecord(
         row_id=row_index,
         instance=getattr(config, "name", "") if config is not None else "",
@@ -204,12 +208,93 @@ def build_error_record(row_index: int, config, error: Exception) -> RowRecord:
         cost_da_milp=getattr(config, "cost_direct_all", None) if config is not None else None,
         cost_vehicle_milp=getattr(config, "cost_vehicles", None) if config is not None else None,
         cost_depot_milp=getattr(config, "cost_depots", None) if config is not None else None,
+        solve_time_total=solve_time_total,
+        status=status,
+        error_message=error_message,
+    )
+
+
+def build_error_record(row_index: int, config, error: Exception) -> RowRecord:
+    """Stub record for a row that raised an exception."""
+    return _stub_row_record(
+        row_index,
+        config,
         status=STATUS_ERROR,
         error_message=f"{type(error).__name__}: {error}",
     )
 
 
+def build_timeout_record(row_index: int, config, timeout_seconds: float, elapsed_seconds: float) -> RowRecord:
+    """Stub record for a row killed by the wall-clock timeout."""
+    return _stub_row_record(
+        row_index,
+        config,
+        status=STATUS_TIMEOUT,
+        error_message=f"TimeoutError: row exceeded {timeout_seconds:g} seconds",
+        solve_time_total=elapsed_seconds,
+    )
+
+
 # ── Batch orchestration ─────────────────────────────────────────────────────
+
+
+def _multiprocessing_context():
+    """Prefer fork so test monkeypatches and loaded state carry into row workers."""
+    methods = mp.get_all_start_methods()
+    if "fork" in methods:
+        return mp.get_context("fork")
+    return mp.get_context()
+
+
+def _row_worker(out_q, xlsx_path: str, row_idx: int, config, row_kwargs: Dict[str, Any]) -> None:
+    """Run one row in a child process and send back a RowRecord."""
+    try:
+        result = run_row_from_excel(xlsx_path, row_idx, **row_kwargs)
+        rec = build_row_record(result, config)
+    except Exception as exc:
+        rec = build_error_record(row_idx, config, exc)
+    out_q.put(rec)
+
+
+def _run_row_with_timeout(
+    xlsx_path: str,
+    row_idx: int,
+    config,
+    row_kwargs: Dict[str, Any],
+    *,
+    row_timeout_seconds: float,
+    elapsed_seconds_start: float,
+) -> RowRecord:
+    """Run one row with a process-level wall-clock guard."""
+    ctx = _multiprocessing_context()
+    out_q = ctx.Queue(maxsize=1)
+    proc = ctx.Process(target=_row_worker, args=(out_q, xlsx_path, row_idx, config, row_kwargs))
+    proc.start()
+
+    try:
+        rec = out_q.get(timeout=row_timeout_seconds)
+        proc.join(timeout=5)
+        if proc.is_alive():  # pragma: no cover - worker should exit after sending its record
+            proc.terminate()
+            proc.join(timeout=5)
+        return rec
+    except queue.Empty:
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=5)
+            if proc.is_alive():  # pragma: no cover - terminate should suffice on supported platforms
+                proc.kill()
+                proc.join(timeout=5)
+            elapsed = time.perf_counter() - elapsed_seconds_start
+            return build_timeout_record(row_idx, config, row_timeout_seconds, elapsed)
+        return build_error_record(
+            row_idx,
+            config,
+            RuntimeError(f"row worker exited without result (exitcode={proc.exitcode})"),
+        )
+    finally:
+        out_q.close()
+        out_q.join_thread()
 
 
 def run_rows(
@@ -228,6 +313,7 @@ def run_rows(
     repair_candidate_policy: str = "baseline",
     max_repair_attempts: int = 1,
     return_completed_records: bool = False,
+    row_timeout_seconds: Optional[float] = None,
 ) -> List[RowRecord]:
     """Run an arbitrary set of Excel rows, returning consolidated records.
 
@@ -245,7 +331,12 @@ def run_rows(
         not needed for the consolidated table. Opt in with ``True``.
 
     One bad row records ``status=ERROR`` without aborting the batch.
+    If ``row_timeout_seconds`` is given, each row runs in a child process and
+    wall-clock overruns record ``status=TIMEOUT`` before the batch continues.
     """
+    if row_timeout_seconds is not None and row_timeout_seconds <= 0:
+        raise ValueError("row_timeout_seconds must be positive or None")
+
     # Resumability: load already-completed row records from checkpoint.
     completed: Set[int] = set()
     completed_records: List[RowRecord] = []
@@ -281,25 +372,38 @@ def run_rows(
         )
         t0 = time.perf_counter()
 
+        row_kwargs = dict(
+            root=root,
+            output_root=output_root,
+            run_id=run_id,
+            seconds_per_run=seconds_per_run,
+            num_solve_runs=num_solve_runs,
+            max_repair_iterations=max_repair_iterations,
+            seed=seed,
+            make_plots=make_plots,
+            repair_candidate_policy=repair_candidate_policy,
+            max_repair_attempts=max_repair_attempts,
+        )
+
         try:
-            result = run_row_from_excel(
-                xlsx_path,
-                row_idx,
-                root=root,
-                output_root=output_root,
-                run_id=run_id,
-                seconds_per_run=seconds_per_run,
-                num_solve_runs=num_solve_runs,
-                max_repair_iterations=max_repair_iterations,
-                seed=seed,
-                make_plots=make_plots,
-                repair_candidate_policy=repair_candidate_policy,
-                max_repair_attempts=max_repair_attempts,
-            )
-            rec = build_row_record(result, config)
+            if row_timeout_seconds is None:
+                result = run_row_from_excel(xlsx_path, row_idx, **row_kwargs)
+                rec = build_row_record(result, config)
+            else:
+                rec = _run_row_with_timeout(
+                    xlsx_path,
+                    row_idx,
+                    config,
+                    row_kwargs,
+                    row_timeout_seconds=row_timeout_seconds,
+                    elapsed_seconds_start=t0,
+                )
         except Exception as exc:
             logger.warning("[%d/%d] row %d ERROR: %s", pos, total, row_idx, exc)
             rec = build_error_record(row_idx, config, exc)
+
+        if rec.status == STATUS_TIMEOUT:
+            logger.warning("[%d/%d] row %d TIMEOUT after %.1fs", pos, total, row_idx, time.perf_counter() - t0)
 
         elapsed = time.perf_counter() - t0
         logger.info(
@@ -581,9 +685,11 @@ def write_summary_markdown(summary: Dict[str, Any], path: str) -> Path:
 __all__ = [
     "CONSOLIDATED_COLUMNS",
     "STATUS_ERROR",
+    "STATUS_TIMEOUT",
     "RowRecord",
     "build_row_record",
     "build_error_record",
+    "build_timeout_record",
     "run_rows",
     "summarize",
     "write_consolidated_csv",

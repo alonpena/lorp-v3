@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--seconds", type=float, default=30.0, help="Seconds per solve run")
     parser.add_argument("--runs", type=int, default=3, help="Number of solve runs per iteration")
     parser.add_argument("--max-iter", type=int, default=5, help="Max repair iterations")
+    parser.add_argument("--row-timeout-seconds", type=float, default=None, help="Wall-clock timeout for each Excel row (disabled by default)")
     parser.add_argument("--repair-policy", default="baseline", choices=["baseline", "safe_length", "safe_capacity_release", "safe_both"], help="Repair candidate safety policy")
     parser.add_argument("--max-repair-attempts", type=int, default=1, help="Reserved for bounded Phase 7 repair retries")
     parser.add_argument("--solver-seed", type=int, default=0, help="Solver RNG seed")
@@ -60,6 +61,7 @@ def main():
         seconds_per_run=args.seconds,
         num_solve_runs=args.runs,
         max_repair_iterations=args.max_iter,
+        row_timeout_seconds=args.row_timeout_seconds,
         seed=args.solver_seed,
         make_plots=args.plots,
         checkpoint_csv=ckpt,

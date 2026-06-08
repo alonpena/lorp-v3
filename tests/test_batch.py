@@ -5,13 +5,16 @@ import json
 import os
 import math
 import tempfile
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from lorp_fsd.batch import (
     CONSOLIDATED_COLUMNS,
     STATUS_ERROR,
+    STATUS_TIMEOUT,
     RowRecord,
     build_error_record,
     build_row_record,
@@ -25,6 +28,7 @@ from lorp_fsd.runner import (
     STATUS_REPAIR_INFEASIBLE,
     STATUS_STUCK_NONCAPACITY,
 )
+from lorp_fsd.experiment_config import ExperimentConfig
 
 XLSX = "results_MILP.xlsx"
 
@@ -116,6 +120,87 @@ class TestCSVWriter:
             header = reader.fieldnames
         for col in CONSOLIDATED_COLUMNS:
             assert col in header, f"missing CSV column {col!r}"
+
+
+class TestRowTimeout:
+    """Per-row wall timeout records TIMEOUT and keeps batch alive."""
+
+    def _config(self, row_index, name):
+        return ExperimentConfig(
+            name=name,
+            F_R=1.0,
+            F_A=2.0,
+            R=3.0,
+            Length=4.0,
+            UB=100.0,
+            cost_routing=10.0,
+            cost_vehicles=20.0,
+            cost_depots=30.0,
+            cost_direct_all=40.0,
+            row_index=row_index,
+        )
+
+    def _fake_result(self, row_index, instance, output_dir):
+        final = SimpleNamespace(
+            cost=SimpleNamespace(
+                total=123.0,
+                cost_routing=10.0,
+                cost_direct_all=20.0,
+                cost_vehicles=30.0,
+                cost_depots=40.0,
+            ),
+            feasibility=SimpleNamespace(
+                capacity_feasible=True,
+                served_exactly_once=True,
+                route_length_violations=[],
+                da_radius_violations=[],
+                penalty_distance_suspected=False,
+            ),
+            metric=SimpleNamespace(label="GAP", value=0.0, flags=set()),
+        )
+        return SimpleNamespace(
+            row_index=row_index,
+            instance_name=instance,
+            status=STATUS_FEASIBLE,
+            final=final,
+            iterations=[],
+            n_iterations=1,
+            total_solve_time=0.01,
+            output_dir=output_dir,
+            route_length_repair_attempts=0,
+        )
+
+    def test_timeout_checkpoint_and_continue(self, monkeypatch, tmp_path):
+        configs = [self._config(0, "slow.dat"), self._config(1, "fast.dat")]
+        monkeypatch.setattr("lorp_fsd.excel_loader.load_lorp_fsd_rows", lambda _path: configs)
+
+        def fake_run_row_from_excel(_xlsx_path, row_index, **_kwargs):
+            if row_index == 0:
+                time.sleep(2.0)
+            return self._fake_result(row_index, configs[row_index].name, tmp_path)
+
+        monkeypatch.setattr("lorp_fsd.batch.run_row_from_excel", fake_run_row_from_excel)
+        ckpt = tmp_path / "checkpoint.csv"
+
+        records = run_rows(
+            [0, 1],
+            "fake.xlsx",
+            output_root=str(tmp_path),
+            run_id="timeout_test",
+            checkpoint_csv=str(ckpt),
+            row_timeout_seconds=0.2,
+        )
+
+        assert [r.status for r in records] == [STATUS_TIMEOUT, STATUS_FEASIBLE]
+        assert records[0].row_id == 0
+        assert records[0].instance == "slow.dat"
+        assert records[0].F_R == 1.0
+        assert records[0].error_message == "TimeoutError: row exceeded 0.2 seconds"
+        assert records[1].row_id == 1
+
+        with ckpt.open(newline="") as f:
+            rows = list(csv.DictReader(f))
+        assert [r["status"] for r in rows] == [STATUS_TIMEOUT, STATUS_FEASIBLE]
 
 
 class TestSummaryWriter:
