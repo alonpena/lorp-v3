@@ -27,7 +27,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from .artifacts import iteration_dir, write_iteration_artifacts
+from .artifacts import iteration_dir, write_iteration_artifacts, write_row_reporting_artifacts
 from .capacity_audit import audit_capacity
 from .cost_reconstruction import comparison_metric, reconstruct_cost
 from .dat_parser import DEFAULT_INSTANCE_FOLDERS, parse_dat, resolve_dat_path
@@ -242,12 +242,14 @@ def run_row(
         selected_prev_pairs = set(repair.selected)
         removed_prev = {c for (_, c) in repair.selected}
 
-    return RowRunResult(
+    result = RowRunResult(
         row_index=config.row_index, instance_name=instance.name, status=status or STATUS_MAX_ITERATIONS,
         final_iteration=iterations[-1].iteration, iterations=iterations, final_metric=final_metric,
         output_dir=out_dir, total_solve_time=total_time, final_forbidden=frozenset(forbidden),
         repair_candidate_policy=repair_candidate_policy, route_length_repair_attempts=0,
     )
+    write_row_reporting_artifacts(out_dir, iterations, result.status)
+    return result
 
 
 def run_row_from_excel(

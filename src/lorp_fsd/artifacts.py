@@ -94,6 +94,18 @@ def build_audit_payload(
     }
 
 
+def _json_cell(value) -> str:
+    return json.dumps(value, sort_keys=True)
+
+
+def _excess_by_depot(capacity) -> Dict[int, float]:
+    return {i: rec.excess for i, rec in capacity.by_depot.items()}
+
+
+def _overloaded_depots(capacity) -> List[int]:
+    return sorted(i for i, rec in capacity.by_depot.items() if rec.excess > 0)
+
+
 def write_iteration_artifacts(
     *, output_dir: Path, iteration: int, row_index, instance, config, geometry,
     facility_design, parsed, cost, capacity, feasibility, metric, forbidden,
@@ -153,4 +165,152 @@ def write_iteration_artifacts(
     return {"audit": audit_path, "routes": routes_path, "assignments": assignments_path}
 
 
-__all__ = ["iteration_dir", "build_audit_payload", "write_iteration_artifacts"]
+ITERATION_SUMMARY_COLUMNS = [
+    "iteration",
+    "iteration_status",
+    "final_status",
+    "solve_time",
+    "z_pyvrp",
+    "comparison_metric_label",
+    "comparison_metric_value",
+    "fully_feasible",
+    "capacity_feasible",
+    "overloaded_depots",
+    "total_excess",
+    "excess_by_depot",
+    "forbidden_count_before",
+    "selected_count",
+    "rejected_count",
+    "repair_infeasible",
+    "infeasible_depots",
+    "forbidden_count_after",
+]
+
+REPAIR_TRACE_COLUMNS = [
+    "iteration",
+    "action",
+    "depot_id",
+    "client_id",
+    "reason",
+    "overloaded_depot",
+    "excess",
+    "forbidden_count_before",
+    "forbidden_count_after",
+    "final_status",
+]
+
+
+def _iteration_status(it) -> str:
+    return "FEASIBLE" if it.feasibility.fully_feasible else "RELAXED_INFEASIBLE"
+
+
+def _forbidden_count_after(it) -> int:
+    repair = it.repair_selection
+    if repair is None:
+        return len(it.forbidden_before)
+    return len(repair.updated_forbidden)
+
+
+def write_iteration_summary_csv(output_dir: Path, iterations, final_status: str) -> Path:
+    """Write row-level per-iteration summary CSV."""
+    path = Path(output_dir) / "iteration_summary.csv"
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=ITERATION_SUMMARY_COLUMNS)
+        w.writeheader()
+        for it in iterations:
+            repair = it.repair_selection
+            selected = getattr(repair, "selected", set()) if repair is not None else set()
+            rejected = getattr(repair, "rejected_candidates", set()) if repair is not None else set()
+            infeasible_depots = getattr(repair, "infeasible_depots", []) if repair is not None else []
+            w.writerow({
+                "iteration": it.iteration,
+                "iteration_status": _iteration_status(it),
+                "final_status": final_status,
+                "solve_time": it.solve_time,
+                "z_pyvrp": it.cost.total,
+                "comparison_metric_label": it.metric.label,
+                "comparison_metric_value": it.metric.value if it.metric.value is not None else "",
+                "fully_feasible": it.feasibility.fully_feasible,
+                "capacity_feasible": it.capacity.capacity_feasible,
+                "overloaded_depots": _json_cell(_overloaded_depots(it.capacity)),
+                "total_excess": it.capacity.total_excess,
+                "excess_by_depot": _json_cell(_excess_by_depot(it.capacity)),
+                "forbidden_count_before": len(it.forbidden_before),
+                "selected_count": len(selected),
+                "rejected_count": len(rejected),
+                "repair_infeasible": bool(getattr(repair, "repair_infeasible", False)) if repair is not None else False,
+                "infeasible_depots": _json_cell(sorted(infeasible_depots)),
+                "forbidden_count_after": _forbidden_count_after(it),
+            })
+    return path
+
+
+def write_repair_trace_csv(output_dir: Path, iterations, final_status: str) -> Path:
+    """Write row-level selected/rejected repair candidate trace CSV."""
+    path = Path(output_dir) / "repair_trace.csv"
+    seen_rejected = set()
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=REPAIR_TRACE_COLUMNS)
+        w.writeheader()
+        for it in iterations:
+            repair = it.repair_selection
+            if repair is None:
+                continue
+            forbidden_before = len(it.forbidden_before)
+            forbidden_after = _forbidden_count_after(it)
+            excess = _excess_by_depot(it.capacity)
+
+            for depot_id, client_id in sorted(getattr(repair, "selected", set())):
+                depot_excess = excess.get(depot_id, 0.0)
+                w.writerow({
+                    "iteration": it.iteration,
+                    "action": "selected",
+                    "depot_id": depot_id,
+                    "client_id": client_id,
+                    "reason": "selected_for_capacity_repair",
+                    "overloaded_depot": depot_excess > 0,
+                    "excess": depot_excess,
+                    "forbidden_count_before": forbidden_before,
+                    "forbidden_count_after": forbidden_after,
+                    "final_status": final_status,
+                })
+
+            for depot_id, client_id, reason in sorted(getattr(repair, "rejected_candidates", set())):
+                key = (depot_id, client_id, reason)
+                if key in seen_rejected:
+                    continue
+                seen_rejected.add(key)
+                depot_excess = excess.get(depot_id, 0.0)
+                w.writerow({
+                    "iteration": it.iteration,
+                    "action": "rejected",
+                    "depot_id": depot_id,
+                    "client_id": client_id,
+                    "reason": reason,
+                    "overloaded_depot": depot_excess > 0,
+                    "excess": depot_excess,
+                    "forbidden_count_before": forbidden_before,
+                    "forbidden_count_after": forbidden_after,
+                    "final_status": final_status,
+                })
+    return path
+
+
+def write_row_reporting_artifacts(output_dir: Path, iterations, final_status: str) -> Dict[str, Path]:
+    """Write minimal row-level reporting trace artifacts without changing JSON."""
+    return {
+        "iteration_summary": write_iteration_summary_csv(output_dir, iterations, final_status),
+        "repair_trace": write_repair_trace_csv(output_dir, iterations, final_status),
+    }
+
+
+__all__ = [
+    "iteration_dir",
+    "build_audit_payload",
+    "write_iteration_artifacts",
+    "ITERATION_SUMMARY_COLUMNS",
+    "REPAIR_TRACE_COLUMNS",
+    "write_iteration_summary_csv",
+    "write_repair_trace_csv",
+    "write_row_reporting_artifacts",
+]
