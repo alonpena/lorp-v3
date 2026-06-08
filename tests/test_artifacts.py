@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import csv
+import json
 from types import SimpleNamespace
 
-from lorp_fsd.artifacts import write_row_reporting_artifacts
+from lorp_fsd.artifacts import write_basic_row_report_artifacts, write_row_reporting_artifacts
 from lorp_fsd.capacity_audit import CapacityAudit, DepotAuditRecord
 from lorp_fsd.repair import RepairSelection, REJECTION_NO_LENGTH_ALTERNATIVE, REJECTION_STRANDS_CLIENT
 
@@ -20,9 +21,23 @@ def _iteration(repair_selection):
     )
     return SimpleNamespace(
         iteration=0,
-        cost=SimpleNamespace(total=123.0),
-        metric=SimpleNamespace(label="RELAXATION_DEVIATION", value=0.25),
-        feasibility=SimpleNamespace(fully_feasible=False),
+        cost=SimpleNamespace(
+            cost_routing=10.0,
+            cost_direct_all=20.0,
+            cost_vehicles=30.0,
+            cost_depots=40.0,
+            total=100.0,
+        ),
+        metric=SimpleNamespace(label="RELAXATION_DEVIATION", value=0.25, flags=set()),
+        feasibility=SimpleNamespace(
+            fully_feasible=False,
+            capacity_feasible=False,
+            served_exactly_once=True,
+            route_length_violations=[],
+            route_capacity_violations=[],
+            da_radius_violations=[],
+            penalty_distance_suspected=False,
+        ),
         capacity=capacity,
         forbidden_before=frozenset({(2, 8)}),
         repair_selection=repair_selection,
@@ -105,3 +120,84 @@ def test_repair_trace_deduplicates_cumulative_rejections(tmp_path):
         trace_rows = list(csv.DictReader(f))
     assert len(trace_rows) == 1
     assert trace_rows[0]["iteration"] == "0"
+
+
+def _result(iteration):
+    return SimpleNamespace(
+        row_index=7,
+        instance_name="sample.dat",
+        status="REPAIR_INFEASIBLE",
+        final_iteration=iteration.iteration,
+        iterations=[iteration],
+        n_iterations=1,
+        total_solve_time=3.0,
+        final_forbidden=frozenset({(1, 7), (2, 8)}),
+        repair_candidate_policy="safe_both",
+        final=iteration,
+    )
+
+
+def _config():
+    return SimpleNamespace(
+        F_R=1.0,
+        F_A=2.0,
+        R=3.0,
+        Length=4.0,
+        UB=90.0,
+        LB=80.0,
+        status="Optimal",
+        gap=0.0,
+        cost_routing=9.0,
+        cost_direct_all=18.0,
+        cost_vehicles=27.0,
+        cost_depots=36.0,
+    )
+
+
+def test_basic_row_report_artifacts_include_json_md_cost_and_depot_usage(tmp_path):
+    repair = RepairSelection(
+        selected={(1, 7)},
+        updated_forbidden={(1, 7), (2, 8)},
+        removed_demand_by_depot={1: 10.0},
+        repair_infeasible=False,
+        infeasible_depots=[],
+        rejected_candidates={(1, 9, REJECTION_NO_LENGTH_ALTERNATIVE)},
+    )
+    result = _result(_iteration(repair))
+
+    paths = write_basic_row_report_artifacts(tmp_path, result, _config())
+
+    assert {p.name for p in paths.values()} == {
+        "report.json",
+        "report.md",
+        "cost-breakdown.csv",
+        "depot_usage.csv",
+    }
+
+    report = json.loads(paths["report_json"].read_text())
+    assert report["row_id"] == 7
+    assert report["instance_name"] == "sample.dat"
+    assert report["status"] == "REPAIR_INFEASIBLE"
+    assert report["final_forbidden_count"] == 2
+    assert report["pyvrp"]["total"] == 100.0
+    assert report["milp"]["UB"] == 90.0
+    assert report["capacity"]["overloaded_depots"] == [1]
+    assert report["repair"]["selected_candidates"] == [[1, 7]]
+    assert report["repair"]["rejected_candidates"] == [[1, 9, REJECTION_NO_LENGTH_ALTERNATIVE]]
+
+    with paths["cost_breakdown"].open(newline="") as f:
+        cost_rows = list(csv.DictReader(f))
+    total = next(r for r in cost_rows if r["component"] == "total")
+    assert total["milp"] == "90.0"
+    assert total["pyvrp"] == "100.0"
+    assert total["delta"] == "10.0"
+
+    with paths["depot_usage"].open(newline="") as f:
+        depot_rows = list(csv.DictReader(f))
+    assert depot_rows[0]["depot_id"] == "1"
+    assert depot_rows[0]["usage_pct"] == "150.0"
+    assert depot_rows[0]["overloaded"] == "True"
+
+    md = paths["report_md"].read_text()
+    assert "# Row 7 — sample.dat" in md
+    assert "`cost-breakdown.csv`" in md

@@ -15,7 +15,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 def iteration_dir(output_root, run_id: str, instance_name: str) -> Path:
@@ -304,13 +304,217 @@ def write_row_reporting_artifacts(output_dir: Path, iterations, final_status: st
     }
 
 
+COST_BREAKDOWN_COLUMNS = ["component", "milp", "pyvrp", "delta"]
+DEPOT_USAGE_COLUMNS = [
+    "depot_id",
+    "demand_routing",
+    "demand_DA",
+    "demand_total",
+    "capacity",
+    "usage_pct",
+    "excess",
+    "overloaded",
+]
+
+
+def _delta(pyvrp_value, milp_value):
+    if pyvrp_value is None or milp_value is None:
+        return None
+    return pyvrp_value - milp_value
+
+
+def _cost_breakdown_rows(result, config) -> List[Dict[str, Any]]:
+    cost = result.final.cost
+    rows = [
+        ("routing", getattr(config, "cost_routing", None), getattr(cost, "cost_routing", None)),
+        ("direct_allocation", getattr(config, "cost_direct_all", None), getattr(cost, "cost_direct_all", None)),
+        ("vehicle", getattr(config, "cost_vehicles", None), getattr(cost, "cost_vehicles", None)),
+        ("depot", getattr(config, "cost_depots", None), getattr(cost, "cost_depots", None)),
+        ("total", getattr(config, "UB", None), getattr(cost, "total", None)),
+    ]
+    return [
+        {"component": name, "milp": milp, "pyvrp": pyvrp, "delta": _delta(pyvrp, milp)}
+        for name, milp, pyvrp in rows
+    ]
+
+
+def _depot_usage_rows(result) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for depot_id, rec in sorted(result.final.capacity.by_depot.items()):
+        usage_pct = None if rec.capacity == 0 else 100.0 * rec.demand_total / rec.capacity
+        rows.append({
+            "depot_id": depot_id,
+            "demand_routing": rec.demand_routing,
+            "demand_DA": rec.demand_da,
+            "demand_total": rec.demand_total,
+            "capacity": rec.capacity,
+            "usage_pct": usage_pct,
+            "excess": rec.excess,
+            "overloaded": rec.excess > 0,
+        })
+    return rows
+
+
+def build_row_report_payload(result, config) -> Dict[str, Any]:
+    """Build basic row-level report payload from final RowRunResult state."""
+    final = result.final
+    repair_selections = [it.repair_selection for it in result.iterations if it.repair_selection is not None]
+    selected = sorted({p for sel in repair_selections for p in getattr(sel, "selected", set())})
+    rejected = sorted({p for sel in repair_selections for p in getattr(sel, "rejected_candidates", set())})
+
+    return {
+        "row_id": result.row_index,
+        "instance_name": result.instance_name,
+        "status": result.status,
+        "final_iteration": result.final_iteration,
+        "n_iterations": result.n_iterations,
+        "total_solve_time": result.total_solve_time,
+        "repair_candidate_policy": getattr(result, "repair_candidate_policy", ""),
+        "final_forbidden_count": len(getattr(result, "final_forbidden", [])),
+        "parameters": {
+            "F_R": getattr(config, "F_R", None),
+            "F_A": getattr(config, "F_A", None),
+            "R": getattr(config, "R", None),
+            "Length": getattr(config, "Length", None),
+        },
+        "milp": {
+            "UB": getattr(config, "UB", None),
+            "LB": getattr(config, "LB", None),
+            "status": getattr(config, "status", None),
+            "gap": getattr(config, "gap", None),
+            "cost_routing": getattr(config, "cost_routing", None),
+            "cost_direct_all": getattr(config, "cost_direct_all", None),
+            "cost_vehicles": getattr(config, "cost_vehicles", None),
+            "cost_depots": getattr(config, "cost_depots", None),
+        },
+        "pyvrp": {
+            "cost_routing": getattr(final.cost, "cost_routing", None),
+            "cost_direct_all": getattr(final.cost, "cost_direct_all", None),
+            "cost_vehicles": getattr(final.cost, "cost_vehicles", None),
+            "cost_depots": getattr(final.cost, "cost_depots", None),
+            "total": getattr(final.cost, "total", None),
+        },
+        "comparison_metric": {
+            "label": getattr(final.metric, "label", ""),
+            "value": getattr(final.metric, "value", None),
+            "flags": sorted(getattr(final.metric, "flags", [])),
+        },
+        "feasibility": {
+            "fully_feasible": getattr(final.feasibility, "fully_feasible", False),
+            "capacity_feasible": getattr(final.feasibility, "capacity_feasible", False),
+            "served_exactly_once": getattr(final.feasibility, "served_exactly_once", False),
+            "route_length_feasible": not getattr(final.feasibility, "route_length_violations", []),
+            "route_capacity_feasible": not getattr(final.feasibility, "route_capacity_violations", []),
+            "da_radius_feasible": not getattr(final.feasibility, "da_radius_violations", []),
+            "penalty_distance_suspected": getattr(final.feasibility, "penalty_distance_suspected", False),
+        },
+        "capacity": {
+            "total_excess": final.capacity.total_excess,
+            "overloaded_depots": _overloaded_depots(final.capacity),
+            "depots": _depot_usage_rows(result),
+        },
+        "repair": {
+            "selected_candidates": [list(p) for p in selected],
+            "rejected_candidates": [list(p) for p in rejected],
+            "selected_count": len(selected),
+            "rejected_count": len(rejected),
+        },
+        "artifacts": {
+            "report_md": "report.md",
+            "report_json": "report.json",
+            "cost_breakdown_csv": "cost-breakdown.csv",
+            "depot_usage_csv": "depot_usage.csv",
+            "iteration_summary_csv": "iteration_summary.csv",
+            "repair_trace_csv": "repair_trace.csv",
+        },
+    }
+
+
+def write_report_json(output_dir: Path, result, config) -> Path:
+    path = Path(output_dir) / "report.json"
+    path.write_text(json.dumps(build_row_report_payload(result, config), indent=2), encoding="utf-8")
+    return path
+
+
+def write_cost_breakdown_csv(output_dir: Path, result, config) -> Path:
+    path = Path(output_dir) / "cost-breakdown.csv"
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=COST_BREAKDOWN_COLUMNS)
+        w.writeheader()
+        for row in _cost_breakdown_rows(result, config):
+            w.writerow(row)
+    return path
+
+
+def write_depot_usage_csv(output_dir: Path, result) -> Path:
+    path = Path(output_dir) / "depot_usage.csv"
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=DEPOT_USAGE_COLUMNS)
+        w.writeheader()
+        for row in _depot_usage_rows(result):
+            w.writerow(row)
+    return path
+
+
+def write_report_md(output_dir: Path, result, config) -> Path:
+    payload = build_row_report_payload(result, config)
+    path = Path(output_dir) / "report.md"
+    metric = payload["comparison_metric"]
+    capacity = payload["capacity"]
+    repair = payload["repair"]
+    lines = [
+        f"# Row {payload['row_id']} — {payload['instance_name']}",
+        "",
+        "| Field | Value |",
+        "|---|---|",
+        f"| status | {payload['status']} |",
+        f"| final_iteration | {payload['final_iteration']} |",
+        f"| n_iterations | {payload['n_iterations']} |",
+        f"| total_solve_time | {payload['total_solve_time']:.6f} |",
+        f"| repair_policy | {payload['repair_candidate_policy']} |",
+        f"| metric | {metric['label']}={metric['value']} |",
+        f"| total_excess | {capacity['total_excess']} |",
+        f"| overloaded_depots | {capacity['overloaded_depots']} |",
+        f"| selected_repair_candidates | {repair['selected_count']} |",
+        f"| rejected_repair_candidates | {repair['rejected_count']} |",
+        "",
+        "## Files",
+        "",
+        "- `report.json`",
+        "- `cost-breakdown.csv`",
+        "- `depot_usage.csv`",
+        "- `iteration_summary.csv`",
+        "- `repair_trace.csv`",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def write_basic_row_report_artifacts(output_dir: Path, result, config) -> Dict[str, Path]:
+    """Write basic row-level report.md/report.json/cost/depot CSV artifacts."""
+    return {
+        "report_json": write_report_json(output_dir, result, config),
+        "report_md": write_report_md(output_dir, result, config),
+        "cost_breakdown": write_cost_breakdown_csv(output_dir, result, config),
+        "depot_usage": write_depot_usage_csv(output_dir, result),
+    }
+
+
 __all__ = [
     "iteration_dir",
     "build_audit_payload",
     "write_iteration_artifacts",
     "ITERATION_SUMMARY_COLUMNS",
     "REPAIR_TRACE_COLUMNS",
+    "COST_BREAKDOWN_COLUMNS",
+    "DEPOT_USAGE_COLUMNS",
     "write_iteration_summary_csv",
     "write_repair_trace_csv",
     "write_row_reporting_artifacts",
+    "build_row_report_payload",
+    "write_report_json",
+    "write_cost_breakdown_csv",
+    "write_depot_usage_csv",
+    "write_report_md",
+    "write_basic_row_report_artifacts",
 ]

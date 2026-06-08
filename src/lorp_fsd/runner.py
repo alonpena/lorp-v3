@@ -27,7 +27,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from .artifacts import iteration_dir, write_iteration_artifacts, write_row_reporting_artifacts
+from .artifacts import (
+    iteration_dir,
+    write_basic_row_report_artifacts,
+    write_iteration_artifacts,
+    write_row_reporting_artifacts,
+)
 from .capacity_audit import audit_capacity
 from .cost_reconstruction import comparison_metric, reconstruct_cost
 from .dat_parser import DEFAULT_INSTANCE_FOLDERS, parse_dat, resolve_dat_path
@@ -249,6 +254,7 @@ def run_row(
         repair_candidate_policy=repair_candidate_policy, route_length_repair_attempts=0,
     )
     write_row_reporting_artifacts(out_dir, iterations, result.status)
+    write_basic_row_report_artifacts(out_dir, result, config)
     return result
 
 
