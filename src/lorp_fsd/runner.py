@@ -40,9 +40,10 @@ from .excel_loader import load_row
 from .facility_sizing import size_capacity  # noqa: F401  (kept for downstream convenience)
 from .feasibility import audit_feasibility, make_feasibility_checker
 from .instance import build_facility_design
+from .penalty_tabu import DEFAULT_REPAIR_MODE, RepairModeState, penalty_value_int
 from .pyvrp_builder import build_relaxed_model
 from .repair import REPAIR_POLICY_BASELINE, build_repair_candidates, select_forbidden_assignments
-from .scaling import build_scaled_geometry
+from .scaling import PYVRP_INT_SCALE, build_scaled_geometry
 from .solution_parser import parse_solution
 
 try:
@@ -84,6 +85,7 @@ class RowRunResult:
     total_solve_time: float
     final_forbidden: frozenset
     repair_candidate_policy: str = REPAIR_POLICY_BASELINE
+    repair_mode: str = DEFAULT_REPAIR_MODE
     route_length_repair_attempts: int = 0
 
     @property
@@ -155,12 +157,20 @@ def run_row(
     make_plots: bool = True,
     repair_candidate_policy: str = REPAIR_POLICY_BASELINE,
     max_repair_attempts: int = 1,
+    repair_mode: str = DEFAULT_REPAIR_MODE,
+    penalty_factor: float = 100.0,
+    tabu_tenure: int = 3,
 ) -> RowRunResult:
     if run_id is None:
         run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
     out_dir = iteration_dir(output_root, run_id, instance.name)
 
-    forbidden: Set[Tuple[int, int]] = set()
+    route_max_distance_int = round(float(config.Length) * PYVRP_INT_SCALE)
+    state = RepairModeState(
+        mode=repair_mode,
+        penalty_value=penalty_value_int(penalty_factor, route_max_distance_int),
+        tabu_tenure=tabu_tenure,
+    )
     removed_prev: Set[int] = set()
     selected_prev_pairs: Set[Tuple[int, int]] = set()
     rejected_repair_candidates: Set[Tuple[int, int, str]] = set()
@@ -170,7 +180,12 @@ def run_row(
     final_metric = None
 
     for it in range(max_repair_iterations + 1):
-        model, info = build_relaxed_model(instance, config, geometry, facility_design, frozenset(forbidden))
+        state.tick(it)
+        forbidden = state.suppressed_pairs()  # what the selector must not re-pick
+        forbidden_arg, penalty_arg = state.builder_args()
+        model, info = build_relaxed_model(
+            instance, config, geometry, facility_design, forbidden_arg, penalty_arg
+        )
         res, solve_time = _solve_multi(model, seconds_per_run, num_solve_runs, seed)
         total_time += solve_time
 
@@ -249,17 +264,29 @@ def run_row(
             status = STATUS_MAX_ITERATIONS
             break
 
-        forbidden = set(repair.updated_forbidden)
+        # map selected pairs -> saving/demand for the repair trace
+        demands = {j: c.demand for j, c in instance.clients.items()}
+        candidates = build_repair_candidates(parsed.routes, cap, geometry, config.F_R, demands)
+        saving_by_pair = {(c.depot_id, c.client_id): c.weighted_saving for c in candidates}
+        demand_by_pair = {(c.depot_id, c.client_id): c.client_demand for c in candidates}
+        state.apply(
+            set(repair.selected), it,
+            saving_by_pair=saving_by_pair, demand_by_pair=demand_by_pair,
+        )
         selected_prev_pairs = set(repair.selected)
         removed_prev = {c for (_, c) in repair.selected}
 
     result = RowRunResult(
         row_index=config.row_index, instance_name=instance.name, status=status or STATUS_MAX_ITERATIONS,
         final_iteration=iterations[-1].iteration, iterations=iterations, final_metric=final_metric,
-        output_dir=out_dir, total_solve_time=total_time, final_forbidden=frozenset(forbidden),
-        repair_candidate_policy=repair_candidate_policy, route_length_repair_attempts=0,
+        output_dir=out_dir, total_solve_time=total_time,
+        final_forbidden=frozenset(state.suppressed_pairs()),
+        repair_candidate_policy=repair_candidate_policy, repair_mode=state.mode,
+        route_length_repair_attempts=0,
     )
-    write_row_reporting_artifacts(out_dir, iterations, result.status)
+    write_row_reporting_artifacts(
+        out_dir, iterations, result.status, repair_mode=state.mode, events=state.events,
+    )
     write_basic_row_report_artifacts(
         out_dir, result, config, instance=instance, geometry=geometry, facility_design=facility_design,
     )
@@ -281,6 +308,9 @@ def run_row_from_excel(
     make_plots: bool = True,
     repair_candidate_policy: str = REPAIR_POLICY_BASELINE,
     max_repair_attempts: int = 1,
+    repair_mode: str = DEFAULT_REPAIR_MODE,
+    penalty_factor: float = 100.0,
+    tabu_tenure: int = 3,
 ) -> RowRunResult:
     """Convenience: load a row, resolve its instance, build geometry/design, run it."""
     config = load_row(xlsx_path, row_index)
@@ -295,6 +325,7 @@ def run_row_from_excel(
         seconds_per_run=seconds_per_run, num_solve_runs=num_solve_runs,
         max_repair_iterations=max_repair_iterations, seed=seed, make_plots=make_plots,
         repair_candidate_policy=repair_candidate_policy, max_repair_attempts=max_repair_attempts,
+        repair_mode=repair_mode, penalty_factor=penalty_factor, tabu_tenure=tabu_tenure,
     )
 
 

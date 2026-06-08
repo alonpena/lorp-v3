@@ -312,6 +312,9 @@ def run_rows(
     checkpoint_csv: Optional[str] = None,
     repair_candidate_policy: str = "baseline",
     max_repair_attempts: int = 1,
+    repair_mode: str = "tabu_penalty",
+    penalty_factor: float = 100.0,
+    tabu_tenure: int = 3,
     return_completed_records: bool = False,
     row_timeout_seconds: Optional[float] = None,
 ) -> List[RowRecord]:
@@ -383,6 +386,9 @@ def run_rows(
             make_plots=make_plots,
             repair_candidate_policy=repair_candidate_policy,
             max_repair_attempts=max_repair_attempts,
+            repair_mode=repair_mode,
+            penalty_factor=penalty_factor,
+            tabu_tenure=tabu_tenure,
         )
 
         try:

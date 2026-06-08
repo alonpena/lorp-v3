@@ -30,6 +30,9 @@ def main():
     parser.add_argument("--max-iter", type=int, default=5, help="Max repair iterations")
     parser.add_argument("--row-timeout-seconds", type=float, default=None, help="Wall-clock timeout for each Excel row (disabled by default)")
     parser.add_argument("--repair-policy", default="baseline", choices=["baseline", "safe_length", "safe_capacity_release", "safe_both"], help="Repair candidate safety policy")
+    parser.add_argument("--repair-mode", default="tabu_penalty", choices=["hard_forbid", "soft_penalty", "tabu_penalty"], help="How selected routing pairs are suppressed (default: tabu_penalty)")
+    parser.add_argument("--penalty-factor", type=float, default=100.0, help="Soft/tabu penalty = factor * route_max_distance_int")
+    parser.add_argument("--tabu-tenure", type=int, default=3, help="Tabu tenure (iterations) for tabu_penalty mode")
     parser.add_argument("--max-repair-attempts", type=int, default=1, help="Reserved for bounded Phase 7 repair retries")
     parser.add_argument("--solver-seed", type=int, default=0, help="Solver RNG seed")
     parser.add_argument("--run-id", default="random_sample", help="Run identifier")
@@ -67,6 +70,9 @@ def main():
         checkpoint_csv=ckpt,
         repair_candidate_policy=args.repair_policy,
         max_repair_attempts=args.max_repair_attempts,
+        repair_mode=args.repair_mode,
+        penalty_factor=args.penalty_factor,
+        tabu_tenure=args.tabu_tenure,
         return_completed_records=True,
     )
 

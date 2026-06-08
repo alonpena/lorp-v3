@@ -188,10 +188,15 @@ ITERATION_SUMMARY_COLUMNS = [
 
 REPAIR_TRACE_COLUMNS = [
     "iteration",
+    "repair_mode",
     "action",
     "depot_id",
     "client_id",
     "reason",
+    "penalty_value",
+    "tabu_remaining",
+    "saving",
+    "demand",
     "overloaded_depot",
     "excess",
     "forbidden_count_before",
@@ -245,8 +250,25 @@ def write_iteration_summary_csv(output_dir: Path, iterations, final_status: str)
     return path
 
 
-def write_repair_trace_csv(output_dir: Path, iterations, final_status: str) -> Path:
-    """Write row-level selected/rejected repair candidate trace CSV."""
+def _blank_trace_row() -> Dict[str, Any]:
+    return {col: "" for col in REPAIR_TRACE_COLUMNS}
+
+
+def write_repair_trace_csv(
+    output_dir: Path,
+    iterations,
+    final_status: str,
+    *,
+    repair_mode: str = "",
+    events=None,
+) -> Path:
+    """Write row-level repair trace CSV.
+
+    Always records the savings-selector decisions (``selected`` / ``rejected``).
+    When ``events`` is given (Phase 9 repair-mode events: ``hard_forbid`` /
+    ``soft_penalty`` / ``tabu_add`` / ``tabu_expire``) those rows are appended
+    with their penalty/tabu detail.
+    """
     path = Path(output_dir) / "repair_trace.csv"
     seen_rejected = set()
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -262,8 +284,10 @@ def write_repair_trace_csv(output_dir: Path, iterations, final_status: str) -> P
 
             for depot_id, client_id in sorted(getattr(repair, "selected", set())):
                 depot_excess = excess.get(depot_id, 0.0)
-                w.writerow({
+                row = _blank_trace_row()
+                row.update({
                     "iteration": it.iteration,
+                    "repair_mode": repair_mode,
                     "action": "selected",
                     "depot_id": depot_id,
                     "client_id": client_id,
@@ -274,6 +298,7 @@ def write_repair_trace_csv(output_dir: Path, iterations, final_status: str) -> P
                     "forbidden_count_after": forbidden_after,
                     "final_status": final_status,
                 })
+                w.writerow(row)
 
             for depot_id, client_id, reason in sorted(getattr(repair, "rejected_candidates", set())):
                 key = (depot_id, client_id, reason)
@@ -281,8 +306,10 @@ def write_repair_trace_csv(output_dir: Path, iterations, final_status: str) -> P
                     continue
                 seen_rejected.add(key)
                 depot_excess = excess.get(depot_id, 0.0)
-                w.writerow({
+                row = _blank_trace_row()
+                row.update({
                     "iteration": it.iteration,
+                    "repair_mode": repair_mode,
                     "action": "rejected",
                     "depot_id": depot_id,
                     "client_id": client_id,
@@ -293,14 +320,31 @@ def write_repair_trace_csv(output_dir: Path, iterations, final_status: str) -> P
                     "forbidden_count_after": forbidden_after,
                     "final_status": final_status,
                 })
+                w.writerow(row)
+
+        for ev in events or []:
+            row = _blank_trace_row()
+            row.update(ev)
+            row["repair_mode"] = repair_mode
+            row["final_status"] = final_status
+            w.writerow(row)
     return path
 
 
-def write_row_reporting_artifacts(output_dir: Path, iterations, final_status: str) -> Dict[str, Path]:
+def write_row_reporting_artifacts(
+    output_dir: Path,
+    iterations,
+    final_status: str,
+    *,
+    repair_mode: str = "",
+    events=None,
+) -> Dict[str, Path]:
     """Write minimal row-level reporting trace artifacts without changing JSON."""
     return {
         "iteration_summary": write_iteration_summary_csv(output_dir, iterations, final_status),
-        "repair_trace": write_repair_trace_csv(output_dir, iterations, final_status),
+        "repair_trace": write_repair_trace_csv(
+            output_dir, iterations, final_status, repair_mode=repair_mode, events=events,
+        ),
     }
 
 

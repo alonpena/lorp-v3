@@ -28,6 +28,9 @@ def main() -> int:
     p.add_argument("--runs", type=int, default=3, help="number of solve runs (seeds)")
     p.add_argument("--max-iter", type=int, default=5, help="max repair iterations")
     p.add_argument("--repair-policy", default="baseline", choices=["baseline", "safe_length", "safe_capacity_release", "safe_both"], help="repair candidate safety policy")
+    p.add_argument("--repair-mode", default="tabu_penalty", choices=["hard_forbid", "soft_penalty", "tabu_penalty"], help="how selected routing pairs are suppressed (default: tabu_penalty)")
+    p.add_argument("--penalty-factor", type=float, default=100.0, help="soft/tabu penalty = factor * route_max_distance_int")
+    p.add_argument("--tabu-tenure", type=int, default=3, help="tabu tenure (iterations) for tabu_penalty mode")
     p.add_argument("--max-repair-attempts", type=int, default=1, help="reserved for bounded Phase 7 repair retries")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--no-plots", action="store_true")
@@ -38,6 +41,7 @@ def main() -> int:
         seconds_per_run=args.seconds, num_solve_runs=args.runs,
         max_repair_iterations=args.max_iter, seed=args.seed, make_plots=not args.no_plots,
         repair_candidate_policy=args.repair_policy, max_repair_attempts=args.max_repair_attempts,
+        repair_mode=args.repair_mode, penalty_factor=args.penalty_factor, tabu_tenure=args.tabu_tenure,
     )
 
     f = result.final
@@ -45,6 +49,7 @@ def main() -> int:
     print(f"status        : {result.status}")
     print(f"iterations    : {result.n_iterations} (final iter {result.final_iteration})")
     print(f"repair policy : {result.repair_candidate_policy}")
+    print(f"repair mode   : {result.repair_mode}")
     print(f"total solve s : {result.total_solve_time:.2f}")
     print(f"Z_PyVRP       : {f.cost.total:.4f}   UB_MILP: {f.metric.ub_milp}")
     print(f"metric        : {f.metric.label} = {f.metric.value}")

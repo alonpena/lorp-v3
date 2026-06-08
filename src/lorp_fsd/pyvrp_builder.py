@@ -91,6 +91,7 @@ class BuildInfo:
     routing_vehicles: List[RoutingVehicleSpec]
     da_options: List[DAOption]
     forbidden_routing_assignments: ForbiddenRoutingAssignments
+    penalty_routing_assignments: Dict[Tuple[int, int], int]
     vehicle_type_meta: List[VehicleTypeMeta]
 
     # reachability helpers (for tests / feasibility)
@@ -134,13 +135,25 @@ def build_relaxed_model(
     geometry,
     facility_design,
     forbidden_routing_assignments: ForbiddenRoutingAssignments = frozenset(),
+    penalty_routing_assignments: Optional[Dict[Tuple[int, int], int]] = None,
 ) -> Tuple[Any, BuildInfo]:
-    """Construct the capacity-relaxed PyVRP model + :class:`BuildInfo`."""
+    """Construct the capacity-relaxed PyVRP model + :class:`BuildInfo`.
+
+    ``penalty_routing_assignments`` maps a routing pair ``(depot_id, client_id)``
+    to an integer penalty added to the *duration/cost* channel of every routing
+    edge that arrives at that client on that depot's profile (Phase 9 soft
+    penalty / tabu). The distance channel is never touched, so route-length
+    feasibility and the geometric cost reconstruction are unaffected; the
+    penalty only steers the PyVRP search away from the pair while keeping it
+    feasible. A pair may be either forbidden (hard) or penalised (soft), not
+    both.
+    """
     _require_pyvrp()
     if config.problem_id != SUPPORTED_PROBLEM_ID:
         raise NotImplementedError("LoRP-v3 currently supports only problemID=0 Arslan scaling.")
 
     forbidden: ForbiddenRoutingAssignments = frozenset(forbidden_routing_assignments)
+    penalty: Dict[Tuple[int, int], int] = dict(penalty_routing_assignments or {})
     F_R = float(config.F_R)
     F_A = float(config.F_A)
     Q = int(instance.vehicle_capacity)
@@ -176,12 +189,19 @@ def build_relaxed_model(
         allowed = [j for j in instance.clients if (depot_id, j) not in forbidden]
         routing_reachable[depot_id] = set(allowed)
 
+        # penalty is charged once per arrival at the penalised client on this
+        # depot's profile -> add it to every edge whose destination is that
+        # client. Distance is left untouched (route-length semantics intact).
+        def pen_in(client_id: int) -> int:
+            return penalty.get((depot_id, client_id), 0)
+
         # depot <-> allowed client (dual-channel)
         for j in allowed:
             cj = client_nodes[j]
             cj_xy = instance.client_xy(j)
             d_int = geometry.dist_scaled_int(depot_xy, cj_xy)
-            m.add_edge(depot_node, cj, distance=d_int, duration=dur(depot_xy, cj_xy, F_R), profile=prof)
+            m.add_edge(depot_node, cj, distance=d_int,
+                       duration=dur(depot_xy, cj_xy, F_R) + pen_in(j), profile=prof)
             m.add_edge(cj, depot_node, distance=d_int, duration=dur(cj_xy, depot_xy, F_R), profile=prof)
 
         # client <-> client among allowed
@@ -194,7 +214,7 @@ def build_relaxed_model(
                 cb = client_nodes[b]
                 b_xy = instance.client_xy(b)
                 m.add_edge(ca, cb, distance=geometry.dist_scaled_int(a_xy, b_xy),
-                           duration=dur(a_xy, b_xy, F_R), profile=prof)
+                           duration=dur(a_xy, b_xy, F_R) + pen_in(b), profile=prof)
 
         specs = routing_vehicle_specs(facility_design.depots[depot_id].capacity, Q, depot_id)
         routing_vehicles.extend(specs)
@@ -260,6 +280,7 @@ def build_relaxed_model(
         routing_vehicles=routing_vehicles,
         da_options=da_options,
         forbidden_routing_assignments=forbidden,
+        penalty_routing_assignments=penalty,
         vehicle_type_meta=vehicle_meta,
         routing_reachable=routing_reachable,
         da_pairs={o.pair for o in da_options},
