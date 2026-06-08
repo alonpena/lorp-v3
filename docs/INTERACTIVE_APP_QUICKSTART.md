@@ -10,11 +10,22 @@ self-contained `index.html`. Plots are embedded as base64, so the file can be
 opened or emailed on its own. It is a **pure reader** — it never runs or
 modifies the solver/repair/cost logic.
 
-The report shows: header (row id, instance, status, parameters), summary cards
-(MILP UB, PyVRP total, GAP, runtime, iterations, feasibility), MILP-vs-PyVRP
-cost table, depot usage, routing/DA mix, feasibility checks, iteration summary,
-repair trace, the basal-instance and combined-solution plots, a legend of all
-status meanings, and the artifact list.
+The report is organised into sticky top **view tabs** (JS, no server):
+**Summary · Costs · Capacity · Feasibility · Iterations · Plots · Files**.
+
+- **Summary** — cards (MILP UB, PyVRP total, GAP, runtime, iterations,
+  feasibility), instance/facility + MILP tables, the professor's-algorithm
+  mapping, and the status-meaning legend.
+- **Costs** — MILP-vs-PyVRP cost table and routing/DA mix.
+- **Capacity** — depot usage, a **repair-policy explanation box** (baseline /
+  safe_length / safe_capacity_release / safe_both, active one highlighted), and
+  the repair summary.
+- **Feasibility** — ex-post checks, iteration summary, repair trace.
+- **Iterations** — per-iteration sub-tabs (Iteration 0, 1, …) from the
+  `iteration_XX_audit.json` files: audit summary, feasibility, selected/rejected
+  repair candidates, routes and assignments tables, and that iteration's plots.
+- **Plots** — basal-instance and combined-solution plots.
+- **Files** — generated artifact list.
 
 ## How to run
 

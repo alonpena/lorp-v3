@@ -9,6 +9,8 @@ import base64
 import json
 
 from lorp_fsd.html_report import (
+    PROFESSOR_MAPPING,
+    REPAIR_POLICY_EXPLANATIONS,
     STATUS_EXPLANATIONS,
     render_index_html,
     write_index_html,
@@ -71,6 +73,35 @@ def _make_folder(tmp_path, status="FEASIBLE"):
     )
     (tmp_path / "iteration_00_instance.png").write_bytes(_PNG)
     (tmp_path / "iteration_00_solution.png").write_bytes(_PNG)
+    (tmp_path / "iteration_00_routes.csv").write_text(
+        "iteration,route_id,depot_id,client_sequence,demand\n0,0,3,12;7,85.0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "iteration_00_assignments.csv").write_text(
+        "iteration,client_id,service_mode,depot_id,demand\n0,12,routing,3,40.0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "iteration_00_audit.json").write_text(
+        json.dumps({
+            "iteration": 0,
+            "status": status,
+            "fully_feasible": status == "FEASIBLE",
+            "capacity_feasible": True,
+            "all_clients_served_exactly_once": True,
+            "route_length_feasible": True,
+            "route_capacity_feasible": True,
+            "da_radius_feasible": True,
+            "penalty_distance_suspected": False,
+            "z_pyvrp": 395.3086,
+            "comparison_metric_label": "GAP",
+            "comparison_metric_value": -8e-07,
+            "solve_time": 3.0,
+            "excess": {"1": 0.0, "3": 0.0},
+            "selected_repair_removals": [],
+            "rejected_repair_candidates": [],
+        }),
+        encoding="utf-8",
+    )
     return tmp_path
 
 
@@ -114,3 +145,38 @@ def test_missing_report_json_raises(tmp_path):
 
     with pytest.raises(FileNotFoundError):
         render_index_html(tmp_path)
+
+
+def test_view_nav_tabs_present(tmp_path):
+    _make_folder(tmp_path)
+    html = render_index_html(tmp_path)
+    for view in ["Summary", "Costs", "Capacity", "Feasibility", "Iterations", "Plots", "Files"]:
+        assert f">{view}</button>" in html
+    assert "showView(" in html
+    assert "showIter(" in html
+
+
+def test_repair_policy_box_explains_active_policy(tmp_path):
+    _make_folder(tmp_path)  # policy safe_both
+    html = render_index_html(tmp_path)
+    for name in REPAIR_POLICY_EXPLANATIONS:
+        assert name in html
+    assert "length safety" in html
+    assert "capacity-release safety" in html
+    assert "← active" in html
+
+
+def test_professor_mapping_rendered(tmp_path):
+    _make_folder(tmp_path)
+    html = render_index_html(tmp_path)
+    assert "professor" in html.lower()
+    assert PROFESSOR_MAPPING[0] in html
+
+
+def test_iteration_panel_from_audit(tmp_path):
+    _make_folder(tmp_path)
+    html = render_index_html(tmp_path)
+    assert 'showIter(0)' in html
+    assert ">Iteration 0</button>" in html
+    assert "Audit summary" in html
+    assert "Selected repair candidates" in html

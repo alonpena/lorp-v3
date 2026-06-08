@@ -64,6 +64,17 @@ Solver / repair / cost-reconstruction logic untouched; runner not modified.
 
 Open the printed `file://…/index.html`.
 
+## Refinement (same day)
+
+Refined the report into a sticky **view-tab** layout (Summary / Costs /
+Capacity / Feasibility / Iterations / Plots / Files) with embedded JS, an
+academic CSS pass (panels, compact cards, sticky grid headers, status pills),
+a **repair-policy explanation box** (baseline / safe_length /
+safe_capacity_release / safe_both, active highlighted; safe_both spelled out),
+a **professor's-algorithm mapping** block, and an **Iterations** view with
+per-iteration sub-tabs reading `iteration_XX_audit.json` + routes/assignments
+CSV previews + per-iteration plots. Still a pure reader; no solver/runner change.
+
 ## Remaining limitations
 
 - One row per file; no batch view from the report.
